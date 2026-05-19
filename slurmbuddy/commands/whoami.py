@@ -36,6 +36,21 @@ def user_accounts(user=None):
     return sorted(accts)
 
 
+def default_account(user=None):
+    """Return the user's SLURM default account, or "" if none/undeterminable.
+
+    This is the account SLURM itself charges when `-A` is omitted.
+    """
+    user = user or slurm.current_user()
+    rows = slurm.run_table(
+        "sacctmgr",
+        ["-nP", "show", "user", user, "format=DefaultAccount"],
+        ["account"],
+        check=False,
+    )
+    return rows[0]["account"] if rows and rows[0]["account"] else ""
+
+
 def run(args):
     user = slurm.current_user()
     if emit_raw(args, "sacctmgr", _assoc_args(user)):

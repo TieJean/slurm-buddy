@@ -77,6 +77,49 @@ def _pad(text, width):
     return text + " " * max(0, width - visible_len(text))
 
 
+def duration_seconds(value):
+    """Parse a SLURM time/duration string to a number of seconds.
+
+    Accepts every SLURM `--time` form: "minutes", "minutes:seconds",
+    "hours:minutes:seconds", "days-hours", "days-hours:minutes" and
+    "days-hours:minutes:seconds". Returns None for infinite/unlimited or
+    anything unparseable, so callers can simply skip the check.
+    """
+    if not value:
+        return None
+    v = value.strip().lower()
+    if v in ("infinite", "unlimited", "n/a", "not_set", "(null)", "-", ""):
+        return None
+
+    days = 0
+    had_dash = "-" in v
+    if had_dash:
+        head, _, v = v.partition("-")
+        try:
+            days = int(head)
+        except ValueError:
+            return None
+    try:
+        nums = [int(p) for p in v.split(":")] if v else [0]
+    except ValueError:
+        return None
+
+    if had_dash:  # days-hours[:minutes[:seconds]]
+        if len(nums) > 3:
+            return None
+        nums = nums + [0] * (3 - len(nums))
+        h, m, s = nums
+    elif len(nums) == 1:  # minutes
+        h, m, s = 0, nums[0], 0
+    elif len(nums) == 2:  # minutes:seconds
+        h, m, s = 0, nums[0], nums[1]
+    elif len(nums) == 3:  # hours:minutes:seconds
+        h, m, s = nums
+    else:
+        return None
+    return days * 86400 + h * 3600 + m * 60 + s
+
+
 def render_table(rows, columns, headers=None):
     """Render `rows` (list of dicts) as an aligned text table.
 

@@ -2,6 +2,15 @@
 
 Reads the shipped config/defaults.ini, then layers a user override from
 ~/.config/slurm-buddy/config.ini if present.
+
+Cluster-scoped sections
+-----------------------
+A section named ``[<name>.<ClusterName>]`` applies ONLY when it matches the
+running cluster's SLURM ClusterName (see ``slurm.cluster_name()``). A plain
+``[<name>]`` section is cluster-neutral and applies everywhere. This lets one
+config file safely carry settings for several clusters at once -- the values
+for one cluster are never used on another. Matching fails closed: when the
+cluster cannot be determined, cluster-scoped sections are simply ignored.
 """
 
 import configparser
@@ -26,6 +35,12 @@ def load():
     return _cache
 
 
+def _cluster():
+    """The running cluster's SLURM ClusterName, lowercased ("" if unknown)."""
+    from . import slurm  # local import: avoids any import-order coupling
+    return slurm.cluster_name()
+
+
 def get(section, key, fallback=None):
     """Get a config string value, or `fallback` if missing/blank."""
     value = load().get(section, key, fallback=fallback)
@@ -43,24 +58,41 @@ def get_bool(section, key, fallback=False):
         return fallback
 
 
-def gpu_memory_table():
-    """Return the [gpu_memory] GPU->memory map, or {} if it does not apply.
+def get_scoped(section, key, fallback=None):
+    """Get a value, preferring the cluster-scoped [section.<cluster>] section.
 
-    GPU memory is not reported by SLURM, so the table is hand-maintained and
-    cluster-specific. If the section sets a 'cluster' key, the table is used
-    ONLY when it matches the running cluster's SLURM ClusterName -- so a table
-    written for one cluster never shows wrong memory figures on another. The
-    match fails closed: an undeterminable cluster yields an empty table.
+    Looks in ``[section.<ClusterName>]`` first, then the neutral ``[section]``.
+    So cluster-specific values (e.g. an interactive partition name) only ever
+    take effect on the cluster they were written for.
     """
     cp = load()
-    if not cp.has_section("gpu_memory"):
+    cluster = _cluster()
+    sections = []
+    if cluster:
+        sections.append("{0}.{1}".format(section, cluster))
+    sections.append(section)
+    for sect in sections:
+        if cp.has_section(sect):
+            value = cp.get(sect, key, fallback=None)
+            if value is not None and value.strip():
+                return value.strip()
+    return fallback
+
+
+def gpu_memory_table():
+    """Return the GPU->memory map for the running cluster, or {}.
+
+    GPU memory is not reported by SLURM, so the table is hand-maintained per
+    cluster in a cluster-scoped [gpu_memory.<ClusterName>] section. Only the
+    section matching the running cluster is read, so one cluster's figures are
+    never shown on another. Fails closed: an undeterminable cluster (or no
+    matching section) yields an empty table.
+    """
+    cluster = _cluster()
+    if not cluster:
         return {}
-    items = {
-        k.lower(): v.strip() for k, v in cp.items("gpu_memory") if v.strip()
-    }
-    table_cluster = items.pop("cluster", "").lower()
-    if table_cluster:
-        from . import slurm  # local import: avoids any import-order coupling
-        if slurm.cluster_name() != table_cluster:
-            return {}
-    return items
+    section = "gpu_memory." + cluster
+    cp = load()
+    if not cp.has_section(section):
+        return {}
+    return {k.lower(): v.strip() for k, v in cp.items(section) if v.strip()}

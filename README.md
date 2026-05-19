@@ -41,9 +41,9 @@ instead of running it.
 ## Interactive nodes: `sb idev`
 
 ```bash
-sb idev -A my-account                          # cpu-interactive, 1 core, 1h
-sb idev -A my-account -p gpuA100x4-interactive -g 1 -t 2:00:00
-sb idev -A my-account --dry-run                # print the command, don't launch
+sb idev                                  # cpu-interactive, 1 core, 1h
+sb idev -p gpuA100x4-interactive -g 1 -t 2:00:00
+sb idev --dry-run                        # show command + estimated start, don't launch
 ```
 
 `sb idev` builds an `srun --pty $SHELL` invocation (or `salloc` with `--salloc`)
@@ -51,43 +51,61 @@ and hands your terminal directly to it. The session **blocks the terminal**
 until you exit it — that is expected. It warns if you target a non-interactive
 partition or are already inside an allocation.
 
-Account resolution: `--account` flag, then `[idev] account` in config, then your
-sole SLURM association. If you belong to several accounts and set none, it
-errors and asks you to pick one.
+**Account resolution** (no `-A` needed in the common case):
+`-A` flag → `account` in config → `$SLURM_ACCOUNT` / `$SALLOC_ACCOUNT` /
+`$SBATCH_ACCOUNT` → your SLURM **default account** → a sole association.
+`sb idev` always prints which account it chose and where it came from; if it
+fell back to your default while you have others, it lists them so you can
+`-A`-switch. It only errors when no account exists at all.
+
+**`--dry-run`** prints the command *and* an estimated start time for that exact
+config, obtained from `srun --test-only` (which validates and estimates without
+submitting anything). A non-timestamp result — e.g. `allocation failure` — is
+highlighted, so dry-run also doubles as a quick "will this config even run"
+check.
 
 ## Configuration
 
-Defaults live in [config/defaults.ini](config/defaults.ini). Override any of
-them per-user by copying that file to `~/.config/slurm-buddy/config.ini` and
-editing it — most usefully, set your default `idev` account:
+Defaults live in [config/defaults.ini](config/defaults.ini). Override per-user
+by copying it to `~/.config/slurm-buddy/config.ini` and editing.
+
+**Cluster-scoped sections.** Anything cluster-specific lives in a section named
+`[<name>.<ClusterName>]` and applies *only* on the cluster whose SLURM
+`ClusterName` matches; plain `[<name>]` sections are cluster-neutral. So one
+config file can hold settings for several clusters and never apply one
+cluster's values on another. Matching fails closed — if the cluster cannot be
+determined, cluster-scoped sections are ignored. (`ClusterName`:
+`scontrol show config | grep ClusterName`.)
 
 ```ini
-[idev]
-account = my-account
-partition = cpu-interactive
+[idev]                    # cluster-neutral
 time = 1:00:00
 cpus = 4
+
+[idev.delta]              # used only on cluster 'delta'
+partition = cpu-interactive
+account = bewg-delta-gpu
+
+[idev.frontera]           # used only on cluster 'frontera'
+partition = development
+account = MY-ALLOC
 ```
+
+The most useful thing to set is your default `idev` account, under the
+`[idev.<yourcluster>]` section.
 
 ### GPU memory
 
 SLURM does not report per-GPU memory anywhere, so the `GPU MEM` column in
-`sb queues` comes from the static `[gpu_memory]` table in the config.
-
-The table is **guarded by cluster identity**: the `cluster` key must equal the
-running cluster's SLURM `ClusterName`, or the table is ignored entirely and the
-column shows `?`. This means the bundled NCSA Delta figures can never be shown
-as wrong data on a different cluster — the guard fails closed (an
-undeterminable cluster also yields `?`).
-
-To use it on another cluster, set `cluster` to your `ClusterName` (find it with
-`scontrol show config | grep ClusterName`) and replace the entries. Key by GPU
-model; append `:<gpus-per-node>` when one model ships in multiple memory sizes
-(e.g. Delta's A100 is 40 GB on x4 nodes, 80 GB on x8 nodes):
+`sb queues` comes from a static, cluster-scoped `[gpu_memory.<ClusterName>]`
+table. Only the section matching the running cluster is read, so the bundled
+NCSA Delta figures can never show as wrong data elsewhere — on any other
+cluster the column shows `?` until you add a section for it. Key by GPU model;
+append `:<gpus-per-node>` when one model ships in multiple memory sizes (e.g.
+Delta's A100 is 40 GB on x4 nodes, 80 GB on x8 nodes):
 
 ```ini
-[gpu_memory]
-cluster = delta
+[gpu_memory.delta]
 A100:4 = 40G
 A100:8 = 80G
 A40 = 48G

@@ -79,6 +79,26 @@ def run_table(cmd, args, columns, sep="|", check=True):
     return rows
 
 
+def run_combined(cmd, args):
+    """Run a command and return stdout+stderr combined, ignoring exit code.
+
+    For SLURM commands whose useful output goes to stderr -- notably
+    `srun --test-only`, which prints its start-time estimate there.
+    """
+    ensure_available(cmd)
+    argv = [cmd] + list(args)
+    try:
+        proc = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+        )
+    except OSError as exc:  # pragma: no cover - defensive
+        raise SlurmError("failed to run {0}: {1}".format(" ".join(argv), exc))
+    return proc.stdout
+
+
 def render_command(cmd, args):
     """Return a copy-pasteable, shell-safe string for the command (--raw)."""
     parts = [cmd]

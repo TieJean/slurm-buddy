@@ -2,7 +2,6 @@
 
 from . import (
     cancel,
-    eta,
     history,
     idev,
     jobs,
@@ -17,7 +16,6 @@ from . import (
 ALL = [
     queues,
     resources,
-    eta,
     idev,
     jobs,
     cancel,

@@ -1,7 +1,8 @@
 """sb idev -- request an interactive compute node.
 
-This is the Delta replacement for TACC's `idev`: Delta has no `idev` command,
-so this builds the equivalent `srun --pty` (or `salloc`) invocation.
+Builds an `srun --pty` (or `salloc`) invocation for an interactive shell on a
+compute node -- a portable equivalent of TACC's `idev`, for the many clusters
+that do not ship one. It does not call or depend on any site-specific tool.
 """
 
 from __future__ import print_function
@@ -39,6 +40,16 @@ def add_parser(subparsers):
         "-n", "--dry-run",
         action="store_true",
         help="print the command without launching",
+    )
+    p.add_argument(
+        "--set-email",
+        metavar="ADDR",
+        help="save a notification email address (and exit)",
+    )
+    p.add_argument(
+        "--no-mail",
+        action="store_true",
+        help="do not send a start-of-job email for this run",
     )
     p.set_defaults(func=run)
 
@@ -138,7 +149,44 @@ def _resolve_resources(args, chosen):
     return gpus, int(config.get_scoped("idev", "cpus", "4")), False
 
 
+def _resolve_email(args):
+    """Resolve the notification email. Returns (address_or_None, source_note).
+
+    Order: $SLURM_EMAIL env var > [idev] email in config > an interactive
+    prompt (the answer is saved to ~/.config/slurm-buddy/config.ini, so the
+    prompt appears only once). The email never lives in the repo.
+    """
+    if args.no_mail:
+        return None, None
+    env = os.environ.get("SLURM_EMAIL")
+    if env:
+        return env, "$SLURM_EMAIL"
+    cfg = config.get_scoped("idev", "email")
+    if cfg:
+        return cfg, "config"
+    if not sys.stdin.isatty():  # cannot prompt -- skip mail silently
+        return None, None
+    try:
+        entered = input("notification email for SLURM (blank to skip): ").strip()
+    except EOFError:
+        return None, None
+    if not entered:
+        return None, None
+    config.set_user_value("idev", "email", entered)
+    return entered, "config (saved)"
+
+
 def run(args):
+    # --set-email is a management action: save the address and exit.
+    if args.set_email:
+        config.set_user_value("idev", "email", args.set_email)
+        print(
+            format.color("saved notification email: ", "bold")
+            + args.set_email
+            + "  " + format.color("(~/.config/slurm-buddy/config.ini)", "dim")
+        )
+        return 0
+
     # partition is cluster-specific: no hardcoded fallback, only -p or the
     # cluster-scoped [idev.<cluster>] config section.
     partition = args.partition or config.get_scoped("idev", "partition")
@@ -196,6 +244,7 @@ def run(args):
         )
 
     gpus, cpus, cpus_matched = _resolve_resources(args, chosen)
+    email, email_src = _resolve_email(args)
 
     shell = os.environ.get("SHELL", "/bin/bash")
     common = [
@@ -209,6 +258,8 @@ def run(args):
         common.append("--gpus={0}".format(gpus))
     if args.mem:
         common.append("--mem=" + args.mem)
+    if email:
+        common += ["--mail-type=BEGIN", "--mail-user=" + email]
 
     if args.salloc:
         argv = ["salloc"] + common
@@ -230,6 +281,12 @@ def run(args):
                 "dim",
             )
         print(format.color("resources: ", "bold") + res)
+    if email:
+        print(
+            format.color("notify: ", "bold")
+            + "email on job start -> " + email
+            + "  " + format.color("(from " + email_src + ")", "dim")
+        )
     print(format.color("$ " + slurm.render_command(argv[0], argv[1:]), "cyan"))
 
     if args.dry_run or getattr(args, "raw", False):

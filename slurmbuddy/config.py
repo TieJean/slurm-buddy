@@ -79,6 +79,61 @@ def get_scoped(section, key, fallback=None):
     return fallback
 
 
+def set_user_value(section, key, value):
+    """Persist section/key into the user config file, preserving other content.
+
+    Writes ~/.config/slurm-buddy/config.ini (creating the file and section as
+    needed) and replaces the key in place if it already exists. Comments and
+    unrelated keys are left untouched -- unlike a configparser rewrite.
+    """
+    try:
+        with open(_USER) as fh:
+            lines = fh.readlines()
+    except IOError:
+        lines = []
+
+    header = "[{0}]".format(section)
+    new_line = "{0} = {1}\n".format(key, value)
+    out = []
+    in_section = False
+    written = False
+    seen_section = False
+
+    for line in lines:
+        stripped = line.strip()
+        is_header = stripped.startswith("[") and stripped.endswith("]")
+        if is_header:
+            if in_section and not written:  # leaving target section
+                out.append(new_line)
+                written = True
+            in_section = stripped == header
+            seen_section = seen_section or in_section
+        elif in_section and not written and not stripped.startswith("#"):
+            bare = stripped.split("=", 1)[0].strip().lower()
+            if bare == key.lower():  # replace existing key in place
+                out.append(new_line)
+                written = True
+                continue
+        out.append(line)
+
+    if in_section and not written:  # target section ran to end of file
+        out.append(new_line)
+        written = True
+    if not seen_section:  # section absent -- append a fresh one
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        if out:
+            out.append("\n")
+        out.extend([header + "\n", new_line])
+
+    os.makedirs(os.path.dirname(_USER), exist_ok=True)
+    with open(_USER, "w") as fh:
+        fh.writelines(out)
+
+    global _cache
+    _cache = None  # force reload so the new value is visible immediately
+
+
 def gpu_memory_table():
     """Return the GPU->memory map for the running cluster, or {}.
 

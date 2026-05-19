@@ -5,9 +5,11 @@ from __future__ import print_function
 from .. import format, slurm
 from ._common import emit_raw
 
-_FMT = "%i|%j|%T|%P|%M|%l|%D|%R"
-_COLS = ["jobid", "name", "state", "partition", "used", "limit", "nodes", "reason"]
-_HEADERS = ["JOBID", "NAME", "STATE", "PARTITION", "USED", "LIMIT", "NODES", "REASON/NODELIST"]
+_FMT = "%i|%j|%T|%P|%M|%l|%D|%S|%R"
+_COLS = ["jobid", "name", "state", "partition", "used", "limit", "nodes",
+         "eta", "reason"]
+_HEADERS = ["JOBID", "NAME", "STATE", "PARTITION", "USED", "LIMIT", "NODES",
+            "EST. START", "REASON/NODELIST"]
 
 
 def add_parser(subparsers):
@@ -38,6 +40,14 @@ def run(args):
     for r in rows:
         r["name"] = r["name"][:24]
         r["reason"] = r["reason"][:28]
+        # An estimated start time is only meaningful for pending jobs; for
+        # running/completing jobs %S is the actual (past) start time.
+        if r["state"] == "PENDING":
+            start = r["eta"]
+            if not start or start.upper() in ("N/A", "(NULL)"):
+                r["eta"] = "unknown"
+        else:
+            r["eta"] = "-"
 
     print(format.render_table(rows, _COLS, _HEADERS))
     print()
@@ -49,4 +59,9 @@ def run(args):
         ),
         "dim",
     ))
+    if n_pend:
+        print(format.color(
+            "Estimated start times are best-effort and shift as the queue "
+            "changes.", "dim",
+        ))
     return 0

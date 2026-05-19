@@ -26,13 +26,13 @@ alias sb='python3 /path/to/slurm-buddy/bin/sb'
 |---|---|
 | `sb queues` | List every partition with node count, time limit, CPUs/mem per node, GPU type/count, and per-GPU memory. `-g` for GPU partitions only. |
 | `sb resources [partition]` | Live idle-vs-total CPU and GPU counts per partition — "can I get a node right now". |
-| `sb eta <jobid>...` | Estimated start time for pending job(s). |
 | `sb idev` | Request an interactive compute node (the Delta replacement for TACC's `idev`). |
-| `sb jobs` | Your running/pending jobs. `-u <user>` for someone else, `-a` for everyone. |
+| `sb jobs` | Your running/pending jobs, with an estimated start time for pending ones. `-u <user>` for someone else, `-a` for everyone. |
 | `sb cancel <jobid>... \| --all` | Cancel job(s); asks for confirmation unless `-y`. |
 | `sb node <name>` | Detailed node info: state, CPUs, memory, GPUs, features, drain reason. |
 | `sb usage` | Fairshare / allocation standing for your accounts. |
 | `sb history [-d N]` | Finished jobs from the last N days with exit codes and elapsed time. |
+| `sb history <jobid>` | Post-mortem of one job: decoded exit code, nodes, work dir, submit line, and a tail of its error output. |
 | `sb whoami` | Your SLURM accounts, partitions, and association limits. |
 
 Global flags: `--no-color`, and `--raw` to print the underlying SLURM command
@@ -41,15 +41,28 @@ instead of running it.
 ## Interactive nodes: `sb idev`
 
 ```bash
-sb idev                                  # cpu-interactive, 1 core, 1h
-sb idev -p gpuA100x4-interactive -g 1 -t 2:00:00
+sb idev -p gpuA100x8-interactive         # 4 GPU + matched CPU (see below)
+sb idev -p gpuA100x4-interactive -g 1     # 1 GPU + 16 matched cores
 sb idev --dry-run                        # show command + estimated start, don't launch
+sb idev --set-email you@example.edu       # save your notification address
 ```
 
 `sb idev` builds an `srun --pty $SHELL` invocation (or `salloc` with `--salloc`)
 and hands your terminal directly to it. The session **blocks the terminal**
 until you exit it — that is expected. It warns if you target a non-interactive
 partition or are already inside an allocation.
+
+**GPU & CPU defaults.** On a GPU partition, `sb idev` defaults to 4 GPUs
+(capped to one node) and *matches* the CPU count to them at the node's
+cores-per-GPU ratio — the most CPUs you can take without raising the bill under
+SLURM's `MAX_TRES` accounting. `-g` / `-c` override either. On a CPU partition
+it just uses the `cpus` default.
+
+**Email notification.** `sb idev` adds `--mail-type=BEGIN` so SLURM emails you
+when the job starts. The address comes from `$SLURM_EMAIL`, else an `email` key
+in `~/.config/slurm-buddy/config.ini` — never the repo. If neither is set it
+prompts once and saves the answer; `--set-email ADDR` changes it, `--no-mail`
+skips it for one run.
 
 **Account resolution** (no `-A` needed in the common case):
 `-A` flag → `account` in config → `$SLURM_ACCOUNT` / `$SALLOC_ACCOUNT` /

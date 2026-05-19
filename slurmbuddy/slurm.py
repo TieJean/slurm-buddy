@@ -105,6 +105,30 @@ def current_user():
     return os.environ.get("USER") or getpass.getuser()
 
 
+_cluster_name = None  # cache; "" once looked up and undeterminable
+
+
+def cluster_name():
+    """Return the SLURM ClusterName, lowercased, or "" if undeterminable.
+
+    Reads `scontrol show config`, which is authoritative and works on both
+    login and compute nodes. Failures return "" so callers can fail closed.
+    """
+    global _cluster_name
+    if _cluster_name is None:
+        _cluster_name = ""
+        try:
+            out = run("scontrol", ["show", "config"], check=False)
+        except SlurmError:
+            return _cluster_name
+        for line in out.splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "ClusterName":
+                _cluster_name = value.strip().lower()
+                break
+    return _cluster_name
+
+
 def is_compute_node():
     """True if we appear to be inside a SLURM allocation already."""
     return "SLURM_JOB_ID" in os.environ or "SLURM_JOBID" in os.environ

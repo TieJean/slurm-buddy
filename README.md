@@ -24,7 +24,7 @@ alias sb='python3 /path/to/slurm-buddy/bin/sb'
 
 | Command | What it does |
 |---|---|
-| `sb queues` | List every partition with node count, time limit, CPUs/mem per node, and GPU type/count. `-g` for GPU partitions only. |
+| `sb queues` | List every partition with node count, time limit, CPUs/mem per node, GPU type/count, and per-GPU memory. `-g` for GPU partitions only. |
 | `sb resources [partition]` | Live idle-vs-total CPU and GPU counts per partition — "can I get a node right now". |
 | `sb eta <jobid>...` | Estimated start time for pending job(s). |
 | `sb idev` | Request an interactive compute node (the Delta replacement for TACC's `idev`). |
@@ -67,6 +67,30 @@ account = my-account
 partition = cpu-interactive
 time = 1:00:00
 cpus = 4
+```
+
+### GPU memory
+
+SLURM does not report per-GPU memory anywhere, so the `GPU MEM` column in
+`sb queues` comes from the static `[gpu_memory]` table in the config.
+
+The table is **guarded by cluster identity**: the `cluster` key must equal the
+running cluster's SLURM `ClusterName`, or the table is ignored entirely and the
+column shows `?`. This means the bundled NCSA Delta figures can never be shown
+as wrong data on a different cluster — the guard fails closed (an
+undeterminable cluster also yields `?`).
+
+To use it on another cluster, set `cluster` to your `ClusterName` (find it with
+`scontrol show config | grep ClusterName`) and replace the entries. Key by GPU
+model; append `:<gpus-per-node>` when one model ships in multiple memory sizes
+(e.g. Delta's A100 is 40 GB on x4 nodes, 80 GB on x8 nodes):
+
+```ini
+[gpu_memory]
+cluster = delta
+A100:4 = 40G
+A100:8 = 80G
+A40 = 48G
 ```
 
 ## Layout

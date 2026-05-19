@@ -2,11 +2,29 @@
 
 from __future__ import print_function
 
-from .. import format, gres, partitions
+from .. import config, format, gres, partitions
 from ._common import emit_raw
 
-_COLUMNS = ["partition", "nodes", "timelimit", "cpus", "mem", "gpus"]
-_HEADERS = ["PARTITION", "NODES", "TIMELIMIT", "CPUS/NODE", "MEM/NODE", "GPUS/NODE"]
+_COLUMNS = ["partition", "nodes", "timelimit", "cpus", "mem", "gpus", "vram"]
+_HEADERS = ["PARTITION", "NODES", "TIMELIMIT", "CPUS/NODE", "MEM/NODE",
+            "GPUS/NODE", "GPU MEM"]
+
+
+def _gpu_memory(gres_str, table):
+    """Per-GPU memory for a GRES string, via the [gpu_memory] config table.
+
+    Tries '<model>:<count>' first (to disambiguate e.g. 40GB vs 80GB A100),
+    then '<model>'. Unknown models show '?'. Returns '-' when there are no GPUs.
+    """
+    gpus = gres.parse(gres_str)
+    if not gpus:
+        return "-"
+    out = []
+    for g in gpus:
+        keyed = "{0}:{1}".format(g["type"], g["count"]).lower()
+        mem = table.get(keyed) or table.get(g["type"].lower()) or "?"
+        out.append(mem)
+    return " / ".join(out)
 
 
 def add_parser(subparsers):
@@ -24,6 +42,7 @@ def run(args):
         return 0
 
     parts = partitions.list_partitions()
+    mem_table = config.gpu_memory_table()
     rows = []
     for p in parts:
         if args.gpu_only and not p.gpus:
@@ -37,6 +56,7 @@ def run(args):
                 "cpus": p.cpus,
                 "mem": format.humanize_mem(p.mem),
                 "gpus": gres.summary(p.gres_str),
+                "vram": _gpu_memory(p.gres_str, mem_table),
             }
         )
 

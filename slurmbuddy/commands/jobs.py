@@ -5,11 +5,28 @@ from __future__ import print_function
 from .. import format, slurm
 from ._common import emit_raw
 
-_FMT = "%i|%j|%T|%P|%M|%l|%D|%S|%R"
-_COLS = ["jobid", "name", "state", "partition", "used", "limit", "nodes",
-         "eta", "reason"]
-_HEADERS = ["JOBID", "NAME", "STATE", "PARTITION", "USED", "LIMIT", "NODES",
-            "EST. START", "REASON/NODELIST"]
+_FMT = "%i|%j|%T|%P|%M|%l|%L|%D|%S|%R"
+_COLS = ["jobid", "name", "state", "partition", "used", "limit", "remaining",
+         "nodes", "eta", "reason"]
+_HEADERS = ["JOBID", "NAME", "STATE", "PARTITION", "USED", "LIMIT", "REMAINING",
+            "NODES", "EST. START", "REASON/NODELIST"]
+
+
+def _interactive_jobids(scope_args):
+    """Return the set of job IDs whose BatchFlag is 0 (interactive).
+
+    Uses a separate `squeue -O BatchFlag` call because the short `-o` format
+    has no batch-flag code. Failures degrade to an empty set, so the main
+    listing still renders.
+    """
+    args = ["-h", "-O", "JobID:|,BatchFlag:|"] + list(scope_args)
+    try:
+        rows = slurm.run_table(
+            "squeue", args, ["jobid", "batchflag"], check=False,
+        )
+    except slurm.SlurmError:
+        return set()
+    return {r["jobid"] for r in rows if r["batchflag"] == "0"}
 
 
 def add_parser(subparsers):
@@ -23,11 +40,13 @@ def add_parser(subparsers):
 
 def run(args):
     squeue_args = ["-h", "-o", _FMT]
+    scope_args = []
     if args.all:
         scope = "all users"
     else:
         user = args.user or slurm.current_user()
-        squeue_args += ["-u", user]
+        scope_args = ["-u", user]
+        squeue_args += scope_args
         scope = user
     if emit_raw(args, "squeue", squeue_args):
         return 0
@@ -36,6 +55,8 @@ def run(args):
     if not rows:
         print("No jobs in queue for {0}.".format(scope))
         return 0
+
+    interactive = _interactive_jobids(scope_args)
 
     for r in rows:
         r["name"] = r["name"][:24]
@@ -48,6 +69,15 @@ def run(args):
                 r["eta"] = "unknown"
         else:
             r["eta"] = "-"
+        # Remaining time is most useful for interactive jobs you're actively
+        # sitting in -- batch users can read USED/LIMIT. Hide it elsewhere to
+        # keep the column quiet for the common case.
+        if r["state"] == "RUNNING" and r["jobid"] in interactive:
+            rem = r["remaining"]
+            if not rem or rem.upper() in ("N/A", "(NULL)", "INFINITE", "UNLIMITED"):
+                r["remaining"] = "-"
+        else:
+            r["remaining"] = "-"
 
     print(format.render_table(rows, _COLS, _HEADERS))
     print()

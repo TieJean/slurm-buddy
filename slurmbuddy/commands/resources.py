@@ -2,11 +2,17 @@
 
 from __future__ import print_function
 
-from .. import format, gres, partitions
+from .. import format, gres, partitions, slurm
 from ._common import emit_raw
 
-_COLUMNS = ["partition", "nodes", "cpus", "gpus"]
-_HEADERS = ["PARTITION", "NODES idle/total", "CPUS idle/total", "GPUS idle/total*"]
+_COLUMNS = ["partition", "nodes", "cpus", "gpus", "jobs"]
+_HEADERS = [
+    "PARTITION",
+    "NODES idle/total",
+    "CPUS idle/total",
+    "GPUS idle/total*",
+    "JOBS run/pend",
+]
 
 
 def add_parser(subparsers):
@@ -24,6 +30,33 @@ def _int(value):
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _job_counts_by_partition():
+    """Return {partition: {"r": running, "pd": pending}} across all users.
+
+    Pending jobs can list multiple partitions in `%P`; count the job once
+    against each. Failures degrade to an empty dict so the rest of `sb
+    resources` still renders.
+    """
+    try:
+        rows = slurm.run_table(
+            "squeue", ["-h", "-o", "%P|%t"], ["partition", "state"], check=False
+        )
+    except slurm.SlurmError:
+        return {}
+    counts = {}
+    for r in rows:
+        state = r["state"].upper()
+        key = "r" if state == "R" else "pd" if state == "PD" else None
+        if key is None:
+            continue
+        for name in r["partition"].split(","):
+            name = name.strip()
+            if not name:
+                continue
+            counts.setdefault(name, {"r": 0, "pd": 0})[key] += 1
+    return counts
 
 
 def run(args):
@@ -69,9 +102,12 @@ def run(args):
         print("No matching partitions.")
         return 0
 
+    jobs = _job_counts_by_partition()
+
     out = []
     for name in sorted(agg):
         a = agg[name]
+        jc = jobs.get(name, {"r": 0, "pd": 0})
         out.append(
             {
                 "partition": name,
@@ -82,6 +118,7 @@ def run(args):
                     if a["g_total"]
                     else "-"
                 ),
+                "jobs": "{0}/{1}".format(jc["r"], jc["pd"]),
             }
         )
 

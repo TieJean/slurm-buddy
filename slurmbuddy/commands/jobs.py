@@ -2,6 +2,8 @@
 
 from __future__ import print_function
 
+import re
+
 from .. import format, slurm
 from ._common import emit_raw
 
@@ -10,6 +12,77 @@ _COLS = ["jobid", "name", "state", "partition", "used", "limit", "remaining",
          "nodes", "eta", "reason"]
 _HEADERS = ["JOBID", "NAME", "STATE", "PARTITION", "USED", "LIMIT", "REMAINING",
             "NODES", "EST. START", "REASON/NODELIST"]
+
+# srun --test-only prints "Job N to start at <ISO timestamp> using ..." on stderr.
+_START_AT_RE = re.compile(r"to start at (\S+)")
+
+
+def _scontrol_show_job(jobid):
+    """Parse `scontrol show job <jobid>` into a flat dict of key=value tokens.
+
+    scontrol prints space-separated `Key=Value` pairs; first occurrence wins.
+    Values are returned as opaque strings -- callers extract what they need.
+    Returns {} on error so callers can degrade silently.
+    """
+    try:
+        out = slurm.run("scontrol", ["show", "job", jobid], check=False)
+    except slurm.SlurmError:
+        return {}
+    fields = {}
+    for line in out.splitlines():
+        for tok in line.strip().split():
+            k, sep, v = tok.partition("=")
+            if sep and k not in fields:
+                fields[k] = v
+    return fields
+
+
+def _test_only_estimate(jobid):
+    """Best-effort upper-bound start time for a pending job via srun --test-only.
+
+    SLURM's backfill scheduler only writes StartTime for jobs it evaluates
+    within its per-cycle limits (bf_max_job_test, bf_max_job_user, bf_window);
+    a freshly-submitted job often shows StartTime=Unknown for a few cycles
+    even when a slot exists. We replay the job's specs through `srun
+    --test-only`, which runs the simulator on demand and returns synchronously.
+
+    The result is an UPPER BOUND: --test-only simulates a *fresh* submission,
+    so it ignores the priority the real job has accrued. The real job can
+    only start earlier, never later. Caller is expected to label it as such.
+    Returns the ISO timestamp string or None.
+    """
+    f = _scontrol_show_job(jobid)
+    account = f.get("Account")
+    partition = f.get("Partition")
+    timelimit = f.get("TimeLimit")
+    if not (account and partition and timelimit):
+        return None
+    # NumNodes is rendered as "min-max"; take the minimum so we ask for the
+    # same shape the user originally requested.
+    nodes = f.get("NumNodes", "1").split("-")[0]
+    args = [
+        "--test-only",
+        "--account=" + account,
+        "--partition=" + partition,
+        "--nodes=" + nodes,
+        "--time=" + timelimit,
+        "--cpus-per-task=" + f.get("CPUs/Task", "1"),
+        "--ntasks=" + f.get("NumTasks", "1"),
+    ]
+    req_tres = f.get("ReqTRES", "")
+    mem = re.search(r"(?:^|,)mem=([^,]+)", req_tres)
+    if mem:
+        args.append("--mem=" + mem.group(1))
+    gpus = re.search(r"gres/gpu=(\d+)", req_tres)
+    if gpus:
+        args.append("--gpus=" + gpus.group(1))
+    args.append("true")
+    try:
+        out = slurm.run_combined("srun", args)
+    except slurm.SlurmError:
+        return None
+    m = _START_AT_RE.search(out)
+    return m.group(1) if m else None
 
 
 def _interactive_jobids(scope_args):
@@ -58,6 +131,11 @@ def run(args):
 
     interactive = _interactive_jobids(scope_args)
 
+    # Test-only fallback shells out to srun, which many sites (TACC) reject
+    # from compute nodes. Skip the fallback in that case to avoid noisy
+    # failures and wasted latency.
+    can_estimate = not slurm.is_compute_node()
+    have_upper_bound = False
     for r in rows:
         r["name"] = r["name"][:24]
         r["reason"] = r["reason"][:28]
@@ -66,7 +144,14 @@ def run(args):
         if r["state"] == "PENDING":
             start = r["eta"]
             if not start or start.upper() in ("N/A", "(NULL)"):
-                r["eta"] = "unknown"
+                # Slurm has no backfill estimate yet; synthesize an upper
+                # bound via srun --test-only (see _test_only_estimate).
+                est = _test_only_estimate(r["jobid"]) if can_estimate else None
+                if est:
+                    r["eta"] = "~" + est
+                    have_upper_bound = True
+                else:
+                    r["eta"] = "unknown"
         else:
             r["eta"] = "-"
         # Remaining time is most useful for interactive jobs you're actively
@@ -93,5 +178,10 @@ def run(args):
         print(format.color(
             "Estimated start times are best-effort and shift as the queue "
             "changes.", "dim",
+        ))
+    if have_upper_bound:
+        print(format.color(
+            "Times prefixed with '~' are upper bounds from srun --test-only "
+            "(SLURM had no estimate yet); the real start is no later.", "dim",
         ))
     return 0

@@ -1,6 +1,7 @@
 """slurm-buddy subcommands. Each module exposes add_parser() and run()."""
 
 from . import (
+    attach,
     cancel,
     history,
     idev,
@@ -17,6 +18,7 @@ ALL = [
     queues,
     resources,
     idev,
+    attach,
     jobs,
     cancel,
     node,

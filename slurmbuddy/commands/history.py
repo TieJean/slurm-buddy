@@ -70,12 +70,50 @@ def _decode_exit(code):
     return "{0}  (clean)".format(code)
 
 
+def _expand_slurm_path(path, main):
+    """Expand SLURM filename pattern characters (%j, %x, ...) in a path.
+
+    sacct returns StdErr/StdOut as the raw pattern -- it does not substitute
+    -- so without this the display shows e.g. 'slurm-%j.err' and tail can't
+    open the file. Handles the common single-letter patterns; anything left
+    after expansion (uncommon: %s/%t/%n) is treated as unresolved by _tail.
+    """
+    if not path or "%" not in path:
+        return path
+    jobid = main.get("jobid") or ""
+    # Array jobs come back as "12345_7"; %A is the master id, %a is the index.
+    if "_" in jobid:
+        array_master, _, array_idx = jobid.partition("_")
+    else:
+        array_master, array_idx = jobid, ""
+    # %N is the first task's hostname. SLURM bracket-form nodelists like
+    # 'gpua[001-002]' need scontrol-style expansion we don't reproduce here,
+    # so we only substitute %N when the nodelist is a plain single hostname.
+    nodelist = main.get("nodelist") or ""
+    node = nodelist if nodelist and "[" not in nodelist and "," not in nodelist else None
+    # Order matters: protect '%%' first.
+    subs = [
+        ("%%", "\0"),
+        ("%J", jobid),
+        ("%j", jobid),
+        ("%x", main.get("name") or ""),
+        ("%A", array_master),
+        ("%a", array_idx),
+        ("%u", os.environ.get("USER", "")),
+    ]
+    if node is not None:
+        subs.append(("%N", node))
+    for k, v in subs:
+        path = path.replace(k, v)
+    return path.replace("\0", "%")
+
+
 def _tail(path):
     """Return the last lines of a file, reading only its tail (huge logs OK).
 
     Returns None if the path is empty, unresolved, or unreadable.
     """
-    if not path or "%" in path:  # no file, or an unexpanded %j/%x pattern
+    if not path or "%" in path:  # no file, or an unexpanded pattern
         return None
     try:
         with open(path, "rb") as fh:
@@ -107,6 +145,11 @@ def _detail(args):
     if main is None:
         print("No job {0} in the accounting records.".format(args.jobid))
         return 1
+
+    # sacct returns StdErr/StdOut with raw %j/%x patterns; expand them once,
+    # in place, so every downstream use (display, tail) sees a real path.
+    main["stderr"] = _expand_slurm_path(main["stderr"], main)
+    main["stdout"] = _expand_slurm_path(main["stdout"], main)
 
     pairs = [
         ("job", main["jobid"]),

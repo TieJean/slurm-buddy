@@ -117,23 +117,35 @@ def _estimate_start(common):
 
 
 def _resolve_resources(args, chosen):
-    """Resolve GPU and CPU counts. Returns (gpus, cpus, cpus_matched).
+    """Resolve GPU, CPU, and memory.
+
+    Returns (gpus, cpus, cpus_matched, mem_mb, mem_matched).
 
     On a GPU partition: default to a configured number of GPUs (capped to one
-    node) and match CPUs at the node's cores-per-GPU ratio -- the most CPUs you
-    can take without raising the bill under Delta's MAX_TRES accounting.
-    Explicit -g / -c always win; `cpus_matched` is True only when CPUs were
-    auto-derived from the GPU count.
+    node) and match BOTH CPUs and memory at the node's per-GPU ratio -- the
+    most resources you can take without raising the bill under Delta's
+    MAX_TRES accounting. Without this, Slurm's `DefMemPerCPU` fallback hands
+    you ~1 GB/CPU regardless of GPU count, which OOMs anything that loads a
+    big checkpoint into host RAM before sharding to GPUs.
+
+    Explicit -g / -c / -m always win. `cpus_matched`/`mem_matched` are True
+    only when that resource was auto-derived from the GPU count. `mem_mb` is
+    None when memory should be left to Slurm (non-GPU partition, explicit
+    --mem, or `chosen.mem` unreadable).
     """
     node_gpus = gres.total_count(chosen.gres_str) if chosen else 0
     try:
         node_cpus = int(chosen.cpus) if chosen else 0
     except (TypeError, ValueError):
         node_cpus = 0
+    try:
+        node_mem = int(chosen.mem) if chosen else 0  # MB, from sinfo %m
+    except (TypeError, ValueError):
+        node_mem = 0
 
     if not node_gpus:  # non-GPU partition
         cpus = args.cpus or int(config.get_scoped("idev", "cpus", "4"))
-        return (args.gpus or 0), cpus, False
+        return (args.gpus or 0), cpus, False, None, False
 
     if args.gpus is not None:
         gpus = args.gpus  # explicit: honored as-is, even if it spans nodes
@@ -141,12 +153,39 @@ def _resolve_resources(args, chosen):
         default = int(config.get_scoped("idev", "gpus", "4"))
         gpus = min(default, node_gpus)  # cap the default to a single node
 
+    cpus_matched = False
     if args.cpus is not None:
-        return gpus, args.cpus, False
-    if gpus > 0 and node_cpus:
-        return gpus, (node_cpus // node_gpus) * gpus, True
-    # GPU partition but resources unreadable -- fall back to the CPU default.
-    return gpus, int(config.get_scoped("idev", "cpus", "4")), False
+        cpus = args.cpus
+    elif gpus > 0 and node_cpus:
+        cpus = (node_cpus // node_gpus) * gpus
+        cpus_matched = True
+    else:
+        # GPU partition but CPU count unreadable -- fall back to default.
+        cpus = int(config.get_scoped("idev", "cpus", "4"))
+
+    mem_mb = None
+    mem_matched = False
+    if args.mem is None and gpus > 0 and node_mem:
+        # Leave a per-node headroom before splitting across GPUs. Slurm
+        # reserves a chunk of each node for the kernel + slurmd
+        # (`MemSpecLimit`, ~8.5 GiB on Delta GPU nodes); asking for >
+        # `RealMemory - MemSpecLimit` trips "Requested node configuration
+        # is not available", which is the failure mode the `--mem` flag
+        # is meant to prevent in the first place. 16 GiB is well above
+        # the observed MemSpecLimit on Delta and is a small fraction of
+        # any GPU node's RAM, so it costs effectively nothing.
+        #
+        # Rounding per-GPU down to whole GB after the headroom gives a
+        # clean display (`--mem=1000G`-style rather than `--mem=1024096M`)
+        # and absorbs any leftover MB into additional safety.
+        node_headroom_mb = 16 * 1024
+        usable = max(0, node_mem - node_headroom_mb)
+        per_gpu_gb = (usable // node_gpus) // 1024
+        if per_gpu_gb > 0:
+            mem_mb = per_gpu_gb * 1024 * gpus
+            mem_matched = True
+
+    return gpus, cpus, cpus_matched, mem_mb, mem_matched
 
 
 def _resolve_email(args):
@@ -243,7 +282,7 @@ def run(args):
             + "you already appear to be inside a SLURM allocation.\n"
         )
 
-    gpus, cpus, cpus_matched = _resolve_resources(args, chosen)
+    gpus, cpus, cpus_matched, mem_mb, mem_matched = _resolve_resources(args, chosen)
     email, email_src = _resolve_email(args)
 
     shell = os.environ.get("SHELL", "/bin/bash")
@@ -258,6 +297,8 @@ def run(args):
         common.append("--gpus={0}".format(gpus))
     if args.mem:
         common.append("--mem=" + args.mem)
+    elif mem_mb:
+        common.append("--mem={0}M".format(mem_mb))
     if email:
         common += ["--mail-type=BEGIN", "--mail-user=" + email]
 
@@ -281,6 +322,19 @@ def run(args):
                 "dim",
             )
         print(format.color("resources: ", "bold") + res)
+    if mem_matched:
+        mem_str = format.humanize_mem(mem_mb)
+        per_gpu = format.humanize_mem(mem_mb // gpus)
+        print(
+            format.color("memory: ", "bold")
+            + mem_str
+            + "  " + format.color(
+                "({0}/GPU -- matched to node ratio)".format(per_gpu),
+                "dim",
+            )
+        )
+    elif args.mem:
+        print(format.color("memory: ", "bold") + args.mem)
     if email:
         print(
             format.color("notify: ", "bold")
